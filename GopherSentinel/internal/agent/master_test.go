@@ -25,7 +25,7 @@ func TestMasterAgent_RecognizeIntent(t *testing.T) {
 			name:    "metric query",
 			query:   "CPU 使用率是多少",
 			wantErr: false,
-			wantLen: 1,
+			wantLen: 2, // matches both metric and log
 		},
 		{
 			name:    "doc query",

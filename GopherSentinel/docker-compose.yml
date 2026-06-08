@@ -1,111 +1,207 @@
 version: '3.8'
 
 services:
+  # ============================================
+  # GopherSentinel - AI DevOps Assistant
+  # ============================================
   app:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: gopher-sentinel
     ports:
       - "8080:8080"
     environment:
-      - LOG_LEVEL=info
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - OLLAMA_HOST=ollama
-      - OLLAMA_PORT=11434
+      # Ollama Configuration
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3
+      - OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+      # Qdrant Configuration
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=gopher_sentinel
+      # Redis Configuration
+      - REDIS_ADDR=redis:6379
+      # Application Settings
+      - GIN_MODE=release
+      - TZ=Asia/Shanghai
+    volumes:
+      # Mount local docs for indexing
+      - ./docs:/app/docs:ro
+      # Config override
+      - ./configs:/app/configs:ro
     depends_on:
-      redis:
-        condition: service_healthy
       qdrant:
         condition: service_healthy
-    restart: unless-stopped
+      redis:
+        condition: service_healthy
     networks:
-      - gophersentinel
+      - gopher-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
+  # ============================================
+  # Ollama - Local LLM Runtime
+  # ============================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: gopher-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - gopher-network
+    restart: unless-stopped
+    profiles:
+      - cpu  # Use: docker-compose --profile cpu up
+      - all   # Default (includes GPU)
+
+  # ============================================
+  # Qdrant - Vector Database
+  # ============================================
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: gopher-qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - gopher-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Redis - Cache & Short-term Memory
+  # ============================================
   redis:
     image: redis:7-alpine
+    container_name: gopher-redis
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - gopher-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - gophersentinel
 
-  qdrant:
-    image: qdrant/qdrant:latest
+  # ============================================
+  # Loki (Optional) - Log Aggregation
+  # ============================================
+  loki:
+    image: grafana/loki:latest
+    container_name: gopher-loki
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "3100:3100"
     volumes:
-      - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - loki-data:/data
+    command: -config.file=/etc/loki/local-config.yaml
     networks:
-      - gophersentinel
+      - gopher-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    networks:
-      - gophersentinel
-
-  langfuse:
-    image: langfuse/langfuse:latest
+  # ============================================
+  # Grafana (Optional) - Visualization
+  # ============================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: gopher-grafana
     ports:
       - "3000:3000"
     environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+    networks:
+      - gopher-network
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # ============================================
+  # Langfuse (Optional) - Observability
+  # ============================================
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: gopher-langfuse
+    ports:
+      - "3001:3000"
+    environment:
       - DATABASE_URL=postgresql://postgres:postgres@langfuse-db:5432/langfuse
-      - NEXTAUTH_SECRET=your-secret-key-change-in-production
-      - SALT=your-salt-value-change-in-production
-      - SECRET_KEY=your-secret-key-change-in-production
+      - NEXTAUTH_SECRET=change-in-production
+      - SALT=change-in-production
+      - SECRET_KEY=change-in-production
     depends_on:
       langfuse-db:
         condition: service_healthy
     networks:
-      - gophersentinel
+      - gopher-network
+    restart: unless-stopped
+    profiles:
+      - observability
 
   langfuse-db:
     image: postgres:15-alpine
+    container_name: gopher-langfuse-db
     environment:
       - POSTGRES_DB=langfuse
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
     volumes:
-      - langfuse_db_data:/var/lib/postgresql/data
+      - langfuse-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - gophersentinel
+      - gopher-network
+    restart: unless-stopped
+    profiles:
+      - observability
 
-volumes:
-  redis_data:
-  qdrant_data:
-  ollama_data:
-  langfuse_db_data:
-
+# ============================================
+# Networks
+# ============================================
 networks:
-  gophersentinel:
+  gopher-network:
     driver: bridge
+    name: gopher-network
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  ollama-data:
+    name: gopher-ollama-data
+  qdrant-data:
+    name: gopher-qdrant-data
+  redis-data:
+    name: gopher-redis-data
+  loki-data:
+    name: gopher-loki-data
+  grafana-data:
+    name: gopher-grafana-data
+  langfuse-data:
+    name: gopher-langfuse-data

@@ -3,7 +3,6 @@ package memory
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"GopherSentinel/pkg/llm"
 )
@@ -98,36 +97,11 @@ func (h *ConversationHistory) FormatHistory() string {
 	return strings.Join(parts, "\n")
 }
 
-// Session represents a conversation session
-type Session struct {
-	ID        string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	History   *ConversationHistory
-	Metadata  map[string]interface{}
-}
-
-// NewSession creates a new conversation session
-func NewSession(id string) *Session {
-	return &Session{
-		ID:        id,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		History:   NewConversationHistory(50),
-		Metadata:  make(map[string]interface{}),
-	}
-}
-
-// Update updates the session timestamp
-func (s *Session) Update() {
-	s.UpdatedAt = time.Now()
-}
-
 // MessageWindow represents a sliding window of messages
 type MessageWindow struct {
-	messages   []llm.Message
-	maxWindow  int
-	overlap    int
+	messages  []llm.Message
+	maxWindow int
+	overlap   int
 }
 
 // NewMessageWindow creates a new message window

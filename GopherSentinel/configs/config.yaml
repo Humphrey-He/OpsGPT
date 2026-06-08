@@ -1,0 +1,32 @@
+# GopherSentinel Configuration
+
+# Ollama API Configuration
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3"
+  embedding_model: "nomic-embed-text"
+  timeout: 120
+
+# Qdrant Vector Database Configuration
+qdrant:
+  url: "http://localhost:6333"
+  collection: "gopher_sentinel"
+  vector_size: 768
+
+# Redis Configuration (for memory)
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+# RAG Configuration
+rag:
+  chunk_size: 512
+  chunk_overlap: 50
+  top_k: 5
+  max_context_tokens: 4096
+
+# CLI Configuration
+cli:
+  stream: true
+  history_limit: 10

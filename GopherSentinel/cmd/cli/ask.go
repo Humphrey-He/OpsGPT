@@ -160,7 +160,7 @@ func interactiveMode(ctx context.Context, ragChain *rag.RAGChain, llmClient *llm
 		// Add response to history (simplified - will be updated with actual response)
 		history.AddAssistantMessage("")
 
-		fmt.Println("\n")
+		fmt.Println()
 	}
 
 	return nil

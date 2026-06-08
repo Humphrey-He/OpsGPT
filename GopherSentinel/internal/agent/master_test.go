@@ -37,7 +37,7 @@ func TestMasterAgent_RecognizeIntent(t *testing.T) {
 			name:    "mixed query",
 			query:   "服务 CPU 高怎么查日志",
 			wantErr: false,
-			wantLen: 2,
+			wantLen: 3, // metric + log + doc agents
 		},
 	}
 

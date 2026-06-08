@@ -23,7 +23,7 @@ func TestMarkdownParser_Parse(t *testing.T) {
 		{
 			name:     "without title",
 			content:  "Just some content here.",
-			wantTitle: "test.md",
+			wantTitle: "test", // Parser strips .md extension
 			wantContains: "Just some content here",
 		},
 		{

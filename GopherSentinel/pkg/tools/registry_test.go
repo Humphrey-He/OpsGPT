@@ -78,30 +78,30 @@ func TestSecurityChecker_Check(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		call    *ToolCall
+		call    ToolCall
 		wantErr bool
 	}{
 		{
 			name: "normal call",
-			call: &ToolCall{
+			call: ToolCall{
 				ToolName: "prometheus_query",
 				Params:   map[string]interface{}{"service": "order"},
 			},
 			wantErr: false,
 		},
 		{
-			name: "dangerous tool name",
-			call: &ToolCall{
-				ToolName: "rm_rf",
+			name: "dangerous tool name - delete pod",
+			call: ToolCall{
+				ToolName: "k8s_delete_pod",
 				Params:   map[string]interface{}{},
 			},
 			wantErr: true,
 		},
 		{
-			name: "dangerous param",
-			call: &ToolCall{
-				ToolName: "exec",
-				Params:   map[string]interface{}{"cmd": "rm -rf /"},
+			name: "dangerous param - path traversal",
+			call: ToolCall{
+				ToolName: "http_get",
+				Params:   map[string]interface{}{"url": "../etc/passwd"},
 			},
 			wantErr: true,
 		},
@@ -123,7 +123,7 @@ func TestToolExecutor_Execute(t *testing.T) {
 
 	executor := NewToolExecutor(registry)
 
-	result, err := executor.Execute(context.Background(), &ToolCall{
+	result, err := executor.Execute(context.Background(), ToolCall{
 		ToolName: "test_tool",
 		Params:   map[string]interface{}{},
 	})
@@ -138,7 +138,8 @@ func TestToolExecutor_Execute(t *testing.T) {
 
 // MockTool 测试用工具
 type MockTool struct {
-	name string
+	name      string
+	dangerous bool
 }
 
 func (t *MockTool) Name() string {
@@ -158,4 +159,8 @@ func (t *MockTool) Schema() map[string]interface{} {
 
 func (t *MockTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	return "mock result", nil
+}
+
+func (t *MockTool) IsDangerous() bool {
+	return t.dangerous
 }

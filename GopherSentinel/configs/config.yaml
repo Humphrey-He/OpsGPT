@@ -3,7 +3,7 @@
 # Ollama API Configuration
 ollama:
   base_url: "http://localhost:11434"
-  model: "llama3"
+  model: "llama3.1:8b"
   embedding_model: "nomic-embed-text"
   timeout: 120
 

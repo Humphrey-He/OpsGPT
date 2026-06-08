@@ -32,15 +32,17 @@ Example:
 }
 
 var ingestFlags = struct {
-	collection    string
-	force         bool
-	showProgress  bool
+	collection   string
+	force       bool
+	showProgress bool
+	mockMode    bool
 }{}
 
 func init() {
 	ingestCmd.Flags().StringVar(&ingestFlags.collection, "collection", "", "collection name (default: from config)")
 	ingestCmd.Flags().BoolVarP(&ingestFlags.force, "force", "f", false, "force re-indexing (clears existing data)")
 	ingestCmd.Flags().BoolVar(&ingestFlags.showProgress, "progress", true, "show progress during indexing")
+	ingestCmd.Flags().BoolVar(&ingestFlags.mockMode, "mock", false, "use mock vector store (for testing without external services)")
 }
 
 func runIngest(cmd *cobra.Command, args []string) error {
@@ -67,18 +69,28 @@ func runIngest(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize vector store
-	collectionName := ingestFlags.collection
-	if collectionName == "" {
-		collectionName = config.Qdrant.Collection
-	}
+	var vectorStore vector.VectorStore
+	var err error
 
-	vectorStore, err := vector.NewQdrantClient(vector.QdrantConfig{
-		URL:        config.Qdrant.URL,
-		Collection: collectionName,
-		VectorSize: config.Qdrant.VectorSize,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize vector store: %w", err)
+	if ingestFlags.mockMode {
+		// Use mock vector store for testing
+		fmt.Println("🔧 Using mock vector store (no external services required)")
+		vectorStore = vector.NewMockVectorStore()
+	} else {
+		// Use real Qdrant client
+		collectionName := ingestFlags.collection
+		if collectionName == "" {
+			collectionName = config.Qdrant.Collection
+		}
+
+		vectorStore, err = vector.NewQdrantClient(vector.QdrantConfig{
+			URL:        config.Qdrant.URL,
+			Collection: collectionName,
+			VectorSize: config.Qdrant.VectorSize,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize vector store: %w", err)
+		}
 	}
 
 	// Initialize RAG chain

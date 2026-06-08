@@ -37,6 +37,7 @@ var askFlags = struct {
 	topK        int
 	session     string
 	clear       bool
+	mockMode    bool
 }{}
 
 func init() {
@@ -45,6 +46,7 @@ func init() {
 	askCmd.Flags().IntVar(&askFlags.topK, "top-k", 5, "number of documents to retrieve")
 	askCmd.Flags().StringVar(&askFlags.session, "session", "", "session ID for conversation history")
 	askCmd.Flags().BoolVar(&askFlags.clear, "clear", false, "clear session history")
+	askCmd.Flags().BoolVar(&askFlags.mockMode, "mock", false, "use mock mode (for testing without external services)")
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
@@ -80,13 +82,23 @@ func runAsk(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize vector store
-	vectorStore, err := vector.NewQdrantClient(vector.QdrantConfig{
-		URL:        config.Qdrant.URL,
-		Collection: config.Qdrant.Collection,
-		VectorSize: config.Qdrant.VectorSize,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to initialize vector store: %w", err)
+	var vectorStore vector.VectorStore
+	var err error
+
+	if askFlags.mockMode {
+		// Use mock vector store for testing
+		fmt.Println("🔧 Using mock vector store (no external services required)")
+		vectorStore = vector.NewMockVectorStore()
+	} else {
+		// Use real Qdrant client
+		vectorStore, err = vector.NewQdrantClient(vector.QdrantConfig{
+			URL:        config.Qdrant.URL,
+			Collection: config.Qdrant.Collection,
+			VectorSize: config.Qdrant.VectorSize,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to initialize vector store: %w", err)
+		}
 	}
 
 	// Initialize RAG chain

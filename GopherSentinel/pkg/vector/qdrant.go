@@ -1,21 +1,24 @@
 package vector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/qdrant/go-client/v2"
-	"github.com/qdrant/go-client/v2/qdrant"
 )
 
-// QdrantClient is a client for Qdrant vector database
+// QdrantClient is a client for Qdrant vector database using REST API
 type QdrantClient struct {
-	client     *qdrant.Client
+	baseURL    string
 	collection string
 	vectorSize int
+	httpClient *http.Client
 }
 
 // QdrantConfig holds configuration for the Qdrant client
@@ -30,61 +33,37 @@ func DefaultQdrantConfig() QdrantConfig {
 	return QdrantConfig{
 		URL:        "http://localhost:6333",
 		Collection: "gopher_sentinel",
-		VectorSize: 768, // Default for nomic-embed-text
+		VectorSize: 768,
 	}
 }
 
 // NewQdrantClient creates a new Qdrant client
 func NewQdrantClient(config QdrantConfig) (*QdrantClient, error) {
-	client, err := qdrant.NewClient(&qdrant.Config{
-		Host: getHost(config.URL),
-		Port: getPort(config.URL),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Qdrant client: %w", err)
-	}
+	baseURL := strings.TrimSuffix(config.URL, "/")
 
 	return &QdrantClient{
-		client:     client,
+		baseURL:    baseURL,
 		collection: config.Collection,
 		vectorSize: config.VectorSize,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
 	}, nil
-}
-
-// getHost extracts host from URL
-func getHost(url string) string {
-	host := strings.TrimPrefix(url, "http://")
-	host = strings.TrimPrefix(host, "https://")
-	parts := strings.Split(host, ":")
-	return parts[0]
-}
-
-// getPort extracts port from URL
-func getPort(url string) int {
-	host := strings.TrimPrefix(url, "http://")
-	host = strings.TrimPrefix(host, "https://")
-	parts := strings.Split(host, ":")
-	if len(parts) > 1 {
-		var port int
-		fmt.Sscanf(parts[1], "%d", &port)
-		return int(port)
-	}
-	return 6333
 }
 
 // Point represents a vector point in Qdrant
 type Point struct {
-	ID       string
-	Vector   []float32
-	Payload  map[string]interface{}
+	ID      string
+	Vector  []float32
+	Payload map[string]interface{}
 }
 
 // SearchResult represents a search result
 type SearchResult struct {
-	ID       string
-	Score    float32
-	Payload  map[string]interface{}
-	Content  string
+	ID      string
+	Score   float32
+	Payload map[string]interface{}
+	Content string
 }
 
 // Upsert inserts or updates points in the collection
@@ -98,23 +77,41 @@ func (c *QdrantClient) Upsert(ctx context.Context, points []Point) error {
 		return fmt.Errorf("failed to ensure collection: %w", err)
 	}
 
-	// Convert points to Qdrant format
-	qdrantPoints := make([]*qdrant.PointStruct, len(points))
+	// Prepare points for upsert
+	upsertPoints := make([]map[string]interface{}, len(points))
 	for i, p := range points {
-		qdrantPoints[i] = &qdrant.PointStruct{
-			Id:      &qdrant.PointId{Id: &qdrant.PointId_Uuid{Uuid: p.ID}},
-			Vector:  convertVector(p.Vector),
-			Payload: convertPayload(p.Payload),
+		upsertPoints[i] = map[string]interface{}{
+			"id":      p.ID,
+			"vector":  p.Vector,
+			"payload": p.Payload,
 		}
 	}
 
-	_, err := c.client.Upsert(ctx, &qdrant.UpsertPoints{
-		CollectionName: c.collection,
-		Points:        qdrantPoints,
-	})
+	body := map[string]interface{}{
+		"points": upsertPoints,
+	}
 
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("failed to upsert points: %w", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/collections/%s/points", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upsert failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -122,46 +119,7 @@ func (c *QdrantClient) Upsert(ctx context.Context, points []Point) error {
 
 // Search searches for similar vectors
 func (c *QdrantClient) Search(ctx context.Context, queryVector []float32, limit int, filters *Filter) ([]SearchResult, error) {
-	// Ensure collection exists
-	if err := c.EnsureCollection(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ensure collection: %w", err)
-	}
-
-	searchParams := &qdrant.SearchParams{}
-
-	var filter *qdrant.Filter
-	if filters != nil {
-		filter = filters.ToQdrant()
-	}
-
-	resp, err := c.client.Search(ctx, &qdrant.SearchPoints{
-		CollectionName: c.collection,
-		Vector:         convertVector(queryVector),
-		Limit:          uint64(limit),
-		Params:         searchParams,
-		WithPayload: &qdrant.WithPayloadSelector{
-			Selector: &qdrant.PayloadSelectorInclude{
-				Includes: []string{"content", "source", "title", "chunk_index", "metadata"},
-			},
-		},
-		Filter: filter,
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to search: %w", err)
-	}
-
-	results := make([]SearchResult, len(resp.Result))
-	for i, r := range resp.Result {
-		results[i] = SearchResult{
-			ID:      extractID(r.Id),
-			Score:   r.Score,
-			Payload: convertPayloadFromProto(r.Payload),
-			Content: extractContent(r.Payload),
-		}
-	}
-
-	return results, nil
+	return c.SearchWithScoreThreshold(ctx, queryVector, limit, 0, filters)
 }
 
 // SearchWithScoreThreshold searches with a minimum score threshold
@@ -171,37 +129,69 @@ func (c *QdrantClient) SearchWithScoreThreshold(ctx context.Context, queryVector
 		return nil, fmt.Errorf("failed to ensure collection: %w", err)
 	}
 
-	var filter *qdrant.Filter
+	// Build request body
+	body := map[string]interface{}{
+		"vector": queryVector,
+		"limit":  limit,
+		"with_payload": map[string]bool{
+			"enable": true,
+		},
+	}
+
+	if scoreThreshold > 0 {
+		body["score_threshold"] = scoreThreshold
+	}
+
 	if filters != nil {
-		filter = filters.ToQdrant()
+		body["filter"] = filters.ToMap()
 	}
 
-	resp, err := c.client.Search(ctx, &qdrant.SearchPoints{
-		CollectionName: c.collection,
-		Vector:         convertVector(queryVector),
-		Limit:          uint64(limit),
-		ScoreThreshold: &qdrant.ScoreThreshold{
-			Value: scoreThreshold,
-		},
-		WithPayload: &qdrant.WithPayloadSelector{
-			Selector: &qdrant.PayloadSelectorInclude{
-				Includes: []string{"content", "source", "title", "chunk_index", "metadata"},
-			},
-		},
-		Filter: filter,
-	})
-
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	results := make([]SearchResult, len(resp.Result))
-	for i, r := range resp.Result {
+	url := fmt.Sprintf("%s/collections/%s/points/search", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("search failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Result []struct {
+			ID      string                 `json:"id"`
+			Score   float32                `json:"score"`
+			Payload map[string]interface{} `json:"payload"`
+		} `json:"result"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	results := make([]SearchResult, len(result.Result))
+	for i, r := range result.Result {
+		content := ""
+		if c, ok := r.Payload["content"].(string); ok {
+			content = c
+		}
 		results[i] = SearchResult{
-			ID:      extractID(r.Id),
+			ID:      r.ID,
 			Score:   r.Score,
-			Payload: convertPayloadFromProto(r.Payload),
-			Content: extractContent(r.Payload),
+			Payload: r.Payload,
+			Content: content,
 		}
 	}
 
@@ -214,18 +204,31 @@ func (c *QdrantClient) Delete(ctx context.Context, ids []string) error {
 		return nil
 	}
 
-	pointIDs := make([]*qdrant.PointId, len(ids))
-	for i, id := range ids {
-		pointIDs[i] = &qdrant.PointId{Id: &qdrant.PointId_Uuid{Uuid: id}}
+	body := map[string]interface{}{
+		"points": ids,
 	}
 
-	_, err := c.client.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: c.collection,
-		Points:         pointIDs,
-	})
-
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("failed to delete points: %w", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/collections/%s/points/delete", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -233,19 +236,31 @@ func (c *QdrantClient) Delete(ctx context.Context, ids []string) error {
 
 // DeleteByFilter removes points matching a filter
 func (c *QdrantClient) DeleteByFilter(ctx context.Context, filter *Filter) error {
-	qdrantFilter := filter.ToQdrant()
+	body := map[string]interface{}{
+		"filter": filter.ToMap(),
+	}
 
-	_, err := c.client.Delete(ctx, &qdrant.DeletePoints{
-		CollectionName: c.collection,
-		PointsSelector: &qdrant.PointsSelector{
-			PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
-				Filter: qdrantFilter,
-			},
-		},
-	})
-
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("failed to delete points by filter: %w", err)
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/collections/%s/points/delete", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -257,32 +272,56 @@ func (c *QdrantClient) GetPoints(ctx context.Context, ids []string) ([]SearchRes
 		return nil, nil
 	}
 
-	pointIDs := make([]*qdrant.PointId, len(ids))
-	for i, id := range ids {
-		pointIDs[i] = &qdrant.PointId{Id: &qdrant.PointId_Uuid{Uuid: id}}
+	body := map[string]interface{}{
+		"ids":           ids,
+		"with_payload":  true,
 	}
 
-	resp, err := c.client.Get(ctx, &qdrant.GetPoints{
-		CollectionName: c.collection,
-		Ids:            pointIDs,
-		WithPayload: &qdrant.WithPayloadSelector{
-			Selector: &qdrant.PayloadSelectorInclude{
-				Includes: []string{"content", "source", "title", "chunk_index", "metadata"},
-			},
-		},
-	})
-
+	jsonBody, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get points: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	results := make([]SearchResult, len(resp.Result))
-	for i, r := range resp.Result {
+	url := fmt.Sprintf("%s/collections/%s/points", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get points failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Result []struct {
+			ID      string                 `json:"id"`
+			Payload map[string]interface{} `json:"payload"`
+		} `json:"result"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	results := make([]SearchResult, len(result.Result))
+	for i, r := range result.Result {
+		content := ""
+		if c, ok := r.Payload["content"].(string); ok {
+			content = c
+		}
 		results[i] = SearchResult{
-			ID:      extractID(r.Id),
-			Score:   1.0, // Default score for direct retrieval
-			Payload: convertPayloadFromProto(r.Payload),
-			Content: extractContent(r.Payload),
+			ID:      r.ID,
+			Score:   1.0,
+			Payload: r.Payload,
+			Content: content,
 		}
 	}
 
@@ -291,44 +330,58 @@ func (c *QdrantClient) GetPoints(ctx context.Context, ids []string) ([]SearchRes
 
 // EnsureCollection creates the collection if it doesn't exist
 func (c *QdrantClient) EnsureCollection(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
 	// Check if collection exists
-	exists, err := c.client.CollectionExists(ctx, c.collection)
+	url := fmt.Sprintf("%s/collections/%s", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to check collection: %w", err)
 	}
+	defer resp.Body.Close()
 
-	if exists {
-		return nil
+	if resp.StatusCode == http.StatusOK {
+		return nil // Collection exists
 	}
 
 	// Create collection
-	_, err = c.client.CreateCollection(ctx, &qdrant.CreateCollection{
-		CollectionName: c.collection,
-		VectorsConfig: &qdrant.VectorsConfig{
-			Config: &qdrant.VectorsConfig_Params{
-				Params: &qdrant.VectorParams{
-					Size:     uint64(c.vectorSize),
-					Distance: qdrant.Distance_Cosine,
-				},
-			},
+	createBody := map[string]interface{}{
+		"vectors": map[string]interface{}{
+			"size":     c.vectorSize,
+			"distance": "Cosine",
 		},
-	})
+	}
 
+	jsonBody, err := json.Marshal(createBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url = fmt.Sprintf("%s/collections/%s", c.baseURL, c.collection)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	createResp, err := c.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to create collection: %w", err)
+	}
+	defer createResp.Body.Close()
+
+	if createResp.StatusCode != http.StatusOK && createResp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(createResp.Body)
+		return fmt.Errorf("create collection failed (status %d): %s", createResp.StatusCode, string(respBody))
 	}
 
 	// Wait for collection to be ready
 	for i := 0; i < 30; i++ {
-		info, err := c.client.GetCollectionInfo(ctx, c.collection)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		if info.Status == qdrant.CollectionStatus_Green {
+		info, err := c.GetCollectionInfo(ctx)
+		if err == nil && info.Status == "green" {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -339,12 +392,21 @@ func (c *QdrantClient) EnsureCollection(ctx context.Context) error {
 
 // DeleteCollection deletes the entire collection
 func (c *QdrantClient) DeleteCollection(ctx context.Context) error {
-	_, err := c.client.DeleteCollection(ctx, &qdrant.DeleteCollection{
-		CollectionName: c.collection,
-	})
+	url := fmt.Sprintf("%s/collections/%s", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
 
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to delete collection: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete collection failed (status %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -352,16 +414,40 @@ func (c *QdrantClient) DeleteCollection(ctx context.Context) error {
 
 // GetCollectionInfo returns information about the collection
 func (c *QdrantClient) GetCollectionInfo(ctx context.Context) (*CollectionInfo, error) {
-	info, err := c.client.GetCollectionInfo(ctx, c.collection)
+	url := fmt.Sprintf("%s/collections/%s", c.baseURL, c.collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get collection info: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get collection info failed (status %d): %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Result struct {
+			Status string `json:"status"`
+			PointsCount uint64 `json:"points_count"`
+			VectorsCount uint64 `json:"vectors_count"`
+		} `json:"result"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	return &CollectionInfo{
 		Name:       c.collection,
-		Points:     info.PointsCount,
-		Vectors:    info.VectorsCount,
-		Status:     info.Status.String(),
+		Points:     result.Result.PointsCount,
+		Vectors:    result.Result.VectorsCount,
+		Status:     result.Result.Status,
 		VectorSize: uint64(c.vectorSize),
 	}, nil
 }
@@ -377,243 +463,44 @@ type CollectionInfo struct {
 
 // Filter represents a filter for searching
 type Filter struct {
-	Should []*Filter `json:"should,omitempty"`
-	Must   []*Filter `json:"must,omitempty"`
+	Should  []*Filter `json:"should,omitempty"`
+	Must    []*Filter `json:"must,omitempty"`
 	MustNot []*Filter `json:"must_not,omitempty"`
 }
 
-// FieldCondition creates a field-based filter condition
-type FieldCondition struct {
-	Key   string
-	Value interface{}
-	Type  string // "match", "range", "exists"
-}
-
-// ToQdrant converts a Filter to Qdrant filter format
-func (f *Filter) ToQdrant() *qdrant.Filter {
+// ToMap converts Filter to a map for JSON serialization
+func (f *Filter) ToMap() map[string]interface{} {
 	if f == nil {
 		return nil
 	}
 
-	filter := &qdrant.Filter{}
+	result := make(map[string]interface{})
 
 	if len(f.Should) > 0 {
-		for _, sf := range f.Should {
-			subFilter := sf.ToQdrant()
-			if subFilter != nil {
-				filter.Should = append(filter.Should, subFilter)
-			}
+		should := make([]map[string]interface{}, len(f.Should))
+		for i, sf := range f.Should {
+			should[i] = sf.ToMap()
 		}
+		result["should"] = should
 	}
 
 	if len(f.Must) > 0 {
-		for _, mf := range f.Must {
-			subFilter := mf.ToQdrant()
-			if subFilter != nil {
-				filter.Must = append(filter.Must, subFilter)
-			}
+		must := make([]map[string]interface{}, len(f.Must))
+		for i, mf := range f.Must {
+			must[i] = mf.ToMap()
 		}
+		result["must"] = must
 	}
 
 	if len(f.MustNot) > 0 {
-		for _, mnf := range f.MustNot {
-			subFilter := mnf.ToQdrant()
-			if subFilter != nil {
-				filter.MustNot = append(filter.MustNot, subFilter)
-			}
+		mustNot := make([]map[string]interface{}, len(f.MustNot))
+		for i, mnf := range f.MustNot {
+			mustNot[i] = mnf.ToMap()
 		}
+		result["must_not"] = mustNot
 	}
 
-	return filter
-}
-
-// NewFilterMatch creates a match filter
-func NewFilterMatch(key string, value interface{}) *Filter {
-	return &Filter{
-		Must: []*Filter{
-			{
-				Should: []*Filter{
-					{
-						Must: []*Filter{
-							{
-								Must: []*Filter{
-									{
-										Must: []*Filter{
-											{
-												Should: []*Filter{
-													{
-														Must: []*Filter{
-															{
-																Should: []*Filter{
-																	{FieldCondition: &qdrant.FieldCondition{
-																		Key: key,
-																		Match: &qdrant.Match{
-																			Value: value,
-																		},
-																	}},
-																},
-															},
-														},
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// NewFilterMust creates a filter that must match
-func NewFilterMust(key string, value interface{}) *Filter {
-	return &Filter{
-		Must: []*Filter{
-			{
-				Should: []*Filter{
-					{
-						Must: []*Filter{
-							{
-								FieldCondition: &qdrant.FieldCondition{
-									Key: key,
-									Match: &qdrant.Match{
-										Value: value,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// Helper functions
-
-func convertVector(v []float32) []float64 {
-	result := make([]float64, len(v))
-	for i, f := range v {
-		result[i] = float64(f)
-	}
 	return result
-}
-
-func convertPayload(p map[string]interface{}) *qdrant.Payload {
-	if p == nil {
-		return nil
-	}
-
-	payload := &qdrant.Payload{
-		Fields: make(map[string]*qdrant.Value),
-	}
-
-	for k, v := range p {
-		payload.Fields[k] = valueToProto(v)
-	}
-
-	return payload
-}
-
-func valueToProto(v interface{}) *qdrant.Value {
-	switch val := v.(type) {
-	case string:
-		return &qdrant.Value{Kind: &qdrant.Value_StringValue{StringValue: val}}
-	case int:
-		return &qdrant.Value{Kind: &qdrant.Value_IntegerValue{IntegerValue: int64(val)}}
-	case int64:
-		return &qdrant.Value{Kind: &qdrant.Value_IntegerValue{IntegerValue: val}}
-	case float32:
-		return &qdrant.Value{Kind: &qdrant.Value_FloatValue{FloatValue: float64(val)}}
-	case float64:
-		return &qdrant.Value{Kind: &qdrant.Value_FloatValue{FloatValue: val}}
-	case bool:
-		return &qdrant.Value{Kind: &qdrant.Value_BoolValue{BoolValue: val}}
-	case []string:
-		return &qdrant.Value{Kind: &qdrant.Value_ListValue{
-			ListValue: &qdrant.ListValue{
-				Values: func() []*qdrant.Value {
-					result := make([]*qdrant.Value, len(val))
-					for i, s := range val {
-						result[i] = &qdrant.Value{Kind: &qdrant.Value_StringValue{StringValue: s}}
-					}
-					return result
-				}(),
-			},
-		}}
-	default:
-		return &qdrant.Value{Kind: &qdrant.Value_StringValue{StringValue: fmt.Sprintf("%v", v)}}
-	}
-}
-
-func convertPayloadFromProto(p *qdrant.Payload) map[string]interface{} {
-	if p == nil || p.Fields == nil {
-		return nil
-	}
-
-	result := make(map[string]interface{})
-	for k, v := range p.Fields {
-		result[k] = protoToValue(v)
-	}
-	return result
-}
-
-func protoToValue(v *qdrant.Value) interface{} {
-	if v == nil || v.Kind == nil {
-		return nil
-	}
-
-	switch kind := v.Kind.(type) {
-	case *qdrant.Value_StringValue:
-		return kind.StringValue
-	case *qdrant.Value_IntegerValue:
-		return kind.IntegerValue
-	case *qdrant.Value_FloatValue:
-		return kind.FloatValue
-	case *qdrant.Value_BoolValue:
-		return kind.BoolValue
-	case *qdrant.Value_ListValue:
-		if kind.ListValue != nil {
-			result := make([]interface{}, len(kind.ListValue.Values))
-			for i, val := range kind.ListValue.Values {
-				result[i] = protoToValue(val)
-			}
-			return result
-		}
-		return nil
-	default:
-		return nil
-	}
-}
-
-func extractID(id *qdrant.PointId) string {
-	if id == nil || id.Id == nil {
-		return ""
-	}
-	switch uuid := id.Id.(type) {
-	case *qdrant.PointId_Uuid:
-		return uuid.Uuid
-	case *qdrant.PointId_Num:
-		return fmt.Sprintf("%d", uuid.Num)
-	default:
-		return uuid.String()
-	}
-}
-
-func extractContent(payload *qdrant.Payload) string {
-	if payload == nil || payload.Fields == nil {
-		return ""
-	}
-	if content, ok := payload.Fields["content"]; ok {
-		if str, ok := content.Kind.(*qdrant.Value_StringValue); ok {
-			return str.StringValue
-		}
-	}
-	return ""
 }
 
 // GeneratePointID generates a new point ID
@@ -625,17 +512,34 @@ func GeneratePointID() string {
 func (c *QdrantClient) IndexDocument(ctx context.Context, content string, vector []float32, metadata map[string]interface{}) error {
 	id := GeneratePointID()
 
+	// Ensure content is in metadata
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+	}
+	metadata["content"] = content
+
 	point := Point{
 		ID:      id,
 		Vector:  vector,
 		Payload: metadata,
 	}
 
-	// Ensure content is in payload
-	if point.Payload == nil {
-		point.Payload = make(map[string]interface{})
-	}
-	point.Payload["content"] = content
-
 	return c.Upsert(ctx, []Point{point})
+}
+
+// IsAvailable checks if Qdrant is available
+func (c *QdrantClient) IsAvailable(ctx context.Context) bool {
+	url := fmt.Sprintf("%s/collections", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusOK
 }

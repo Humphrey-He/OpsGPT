@@ -5,11 +5,33 @@ import (
 	"time"
 )
 
+// ShortTermMemory 短期记忆（Redis）
+type ShortTermMemory struct {
+	// 实际实现需要 Redis 客户端
+}
+
+// Append 添加到短期记忆
+func (m *ShortTermMemory) Append(ctx context.Context, event *MemoryEvent) error {
+	// TODO: 实现 Redis 存储
+	return nil
+}
+
+// GetRecent 获取最近的记忆
+func (m *ShortTermMemory) GetRecent(ctx context.Context, n int) ([]*MemoryEvent, error) {
+	// TODO: 实现 Redis 查询
+	return nil, nil
+}
+
+// NewShortTermMemory 创建短期记忆
+func NewShortTermMemory() *ShortTermMemory {
+	return &ShortTermMemory{}
+}
+
 // MemorySystem 完整记忆系统
 type MemorySystem struct {
-	working  *WorkingMemory
+	working   *WorkingMemory
 	shortTerm *ShortTermMemory
-	longTerm *LongTermMemory
+	longTerm  *LongTermMemory
 }
 
 // NewMemorySystem 创建完整记忆系统

@@ -139,7 +139,7 @@ func (c *SlidingWindowChunker) findBreakPoint(text string, start, end int) int {
 	// Look for sentence break (. ! ?)
 	sentenceBreak := -1
 	for i := end - 1; i > start+c.config.ChunkSize/2 && i < len(text); i-- {
-		if isSentenceEnding(text[i]) && i+1 < len(text) && isWhitespace(text[i+1]) {
+		if isSentenceEnding(rune(text[i])) && i+1 < len(text) && isWhitespace(rune(text[i+1])) {
 			sentenceBreak = i + 1
 			break
 		}

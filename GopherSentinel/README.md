@@ -1,117 +1,141 @@
-# GopherSentinel
+# 🔭 GopherSentinel
 
-AI-powered DevOps Assistant - 基于 RAG 的智能运维助手
+> 企业级 AI 智能运维与研发助手 | Enterprise AI Operations & Development Assistant
 
-## 🚀 功能特性
+[![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/Humphrey-He/OpsGPT/ci.yml)](https://github.com/Humphrey-He/OpsGPT/actions)
 
-- **RAG 知识库**: 自动解析和索引项目文档，支持 Markdown/PDF/TXT
-- **智能问答**: 基于向量检索的精准问答，支持流式输出
-- **多工具集成**: Prometheus 监控、Loki 日志、K8s 操作等
-- **多 Agent 协作**: Master-Worker 架构处理复杂故障诊断
-- **记忆系统**: 短期对话记忆 + 长期知识积累
+## ✨ 特性
 
-## 📋 前置要求
+- 🤖 **RAG 智能问答** - 基于混合检索和 Rerank 的高精度知识库问答
+- 🔧 **Multi-Agent 协作** - 多智能体并行分析日志、指标、文档
+- 📡 **Function Calling** - 自然语言驱动 Prometheus、Loki、K8s 等系统
+- 🧠 **分层记忆系统** - 工作记忆 → 短期记忆 (Redis) → 长期记忆 (向量库)
+- 🔒 **企业级安全** - 限流、审计、危险操作确认
+- 📊 **全链路可观测** - Langfuse 追踪思维链，Zap 结构化日志
 
-- Go 1.21+
-- Ollama (本地 LLM)
-- Qdrant (向量数据库)
-- Redis (可选，缓存用)
+## 📖 文档
 
-## 🛠️ 快速开始
+- [项目规划文档](./docs/)
+- [快速开始指南](./docs/05_快速开始指南.md)
+- [技术架构设计](./docs/03_技术架构设计.md)
+- [面试题问答手册](./docs/07_面试题问答手册.md)
 
-### 1. 安装依赖
+## 🚀 快速开始
+
+### 使用 Docker Compose
 
 ```bash
 # 克隆项目
-git clone <repo-url>
-cd GopherSentinel
+git clone https://github.com/Humphrey-He/OpsGPT.git
+cd OpsGPT/GopherSentinel
 
-# 下载 Go 依赖
+# 启动所有服务
+docker-compose up -d
+
+# 运行 CLI
+docker-compose exec app ./GopherSentinel ask "帮我分析订单服务"
+```
+
+### 手动部署
+
+```bash
+# 1. 安装依赖
 go mod download
+
+# 2. 配置环境
+cp .env.example .env
+# 编辑 .env 配置
+
+# 3. 启动服务 (Qdrant, Redis, Ollama)
+docker-compose up -d qdrant redis ollama
+
+# 4. 构建并运行
+make build
+./bin/GopherSentinel ask "这个项目怎么部署？"
 ```
 
-### 2. 启动服务
+## 🏗️ 架构
 
-```bash
-# 启动 Ollama (确保模型已下载)
-ollama serve
-ollama pull llama3
-ollama pull nomic-embed-text
-
-# 启动 Qdrant
-docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+```
+┌─────────────────────────────────────────────────────────┐
+│                    GopherSentinel                       │
+├─────────────────────────────────────────────────────────┤
+│  CLI / HTTP API                                        │
+├─────────────────────────────────────────────────────────┤
+│  Master Agent (意图识别 → 任务调度)                    │
+├─────────────────────────────────────────────────────────┤
+│  Log-Agent │ Metric-Agent │ Doc-Agent │ Custom-Agent   │
+├─────────────────────────────────────────────────────────┤
+│  Tools: Prometheus | Loki | K8s | HTTP | DB           │
+├─────────────────────────────────────────────────────────┤
+│  RAG: Embedding → Hybrid Search → Rerank → Generate   │
+├─────────────────────────────────────────────────────────┤
+│  Memory: Working → Short-term (Redis) → Long-term     │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### 3. 运行
+## 📈 技术栈
 
-```bash
-# 构建
-go build -o GopherSentinel ./cmd/cli
+| 层级 | 技术选型 | 说明 |
+|-----|---------|------|
+| **LLM** | Ollama / OpenAI | 本地或云端推理 |
+| **向量库** | Qdrant | 高性能向量检索 |
+| **缓存** | Redis | 短期记忆、限流 |
+| **追踪** | Langfuse | Agent 思维链追踪 |
+| **日志** | Zap | 结构化日志 |
+| **CLI** | Cobra | 命令行框架 |
 
-# 索引文档
-./GopherSentinel ingest ./docs
-
-# 提问
-./GopherSentinel ask "这个项目的架构是什么？"
-
-# 交互模式
-./GopherSentinel ask -i
-```
-
-## 📁 项目结构
+## 📂 项目结构
 
 ```
 GopherSentinel/
-├── cmd/cli/           # CLI 入口
+├── cmd/cli/                    # CLI 入口
 ├── internal/
-│   ├── rag/          # RAG 链路
-│   ├── memory/       # 记忆系统
-│   └── agent/        # Agent 系统
+│   ├── agent/                  # Agent 核心 (Master, ReAct, SubAgents)
+│   ├── rag/                    # RAG 链路 (检索, Rerank)
+│   └── memory/                 # 记忆系统 (Working, Short, Long)
 ├── pkg/
-│   ├── parser/       # 文档解析
-│   ├── vector/       # 向量存储
-│   ├── llm/          # LLM 客户端
-│   └── tools/        # 工具集
-├── configs/          # 配置文件
-└── docs/             # 文档目录
+│   ├── llm/                    # LLM 客户端 (Ollama, OpenAI)
+│   ├── tools/                  # 工具系统 (Prometheus, Loki, K8s)
+│   ├── parser/                 # 文档解析 (Markdown, PDF, Text)
+│   ├── vector/                 # 向量存储 (Qdrant)
+│   ├── observability/           # 可观测性 (Langfuse)
+│   └── security/               # 安全模块 (限流, 注入检测)
+├── configs/                    # 配置文件
+├── Dockerfile
+├── docker-compose.yml
+└── Makefile
 ```
-
-## ⚙️ 配置
-
-编辑 `configs/config.yaml`:
-
-```yaml
-ollama:
-  base_url: "http://localhost:11434"
-  model: "llama3"
-  embedding_model: "nomic-embed-text"
-
-qdrant:
-  url: "http://localhost:6333"
-  collection: "gopher_sentinel"
-  vector_size: 768
-
-rag:
-  chunk_size: 512
-  chunk_overlap: 50
-  top_k: 5
-```
-
-## 📖 开发计划
-
-详见 [docs/02_详细开发计划.md](docs/02_详细开发计划.md)
-
-- Week 1-2: 基础 RAG 知识库 (当前阶段)
-- Week 3-4: 工具化与实时数据接入
-- Week 5-6: 多智能体协作与记忆系统
-- Week 7-8: 工程化打磨与评测
 
 ## 🧪 测试
 
 ```bash
-go test ./... -v
+# 运行所有测试
+make test
+
+# 带覆盖率
+make test-coverage
+
+# E2E 测试
+make e2e
 ```
 
-## 📝 License
+## 📋 开发阶段
 
-MIT
+| 阶段 | 状态 | 说明 |
+|-----|------|------|
+| Phase 1 | ✅ 完成 | 基础 RAG + CLI |
+| Phase 2 | ✅ 完成 | 工具集成 + Function Calling |
+| Phase 3 | ✅ 完成 | Multi-Agent + 记忆系统 |
+| Phase 4 | ✅ 完成 | 安全 + 可观测性 + 部署 |
+| 文档 | ✅ 完成 | 完整项目文档 |
+
+## 🤝 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+## 📄 许可证
+
+MIT License
